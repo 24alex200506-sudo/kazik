@@ -18,6 +18,19 @@ const CP = E.CRYPTO_PAY_API || 'https://pay.crypt.bot/api';
 const MIN = Number(E.MIN_DEPOSIT || 1), MAX = Number(E.MAX_DEPOSIT || 1000);
 const DEV = E.DEV === '1';
 const DB_FILE = E.DB_FILE || path.join(dir, 'data.json');
+const ADMIN_ID = E.ADMIN_ID || '7106144706'; // твой Telegram ID для уведомлений
+
+// ---- уведомления администратору
+const notify = async (text) => {
+  if (!BOT_TOKEN || !ADMIN_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: ADMIN_ID, text, parse_mode: 'HTML' }),
+    });
+  } catch {}
+};
 
 // ---- хранилище (JSON-файл; для большого трафика заменить на PostgreSQL/SQLite)
 let db = { users: {}, invoices: {} };
@@ -60,6 +73,13 @@ function creditIfPaid(inv) {
   rec.status = 'paid'; rec.paidAt = Date.now();
   user(rec.user).cents += rec.cents;
   save();
+  // уведомление о пополнении
+  notify(
+    `💰 <b>Пополнение баланса!</b>\n\n` +
+    `👤 ID игрока: <code>${rec.user}</code>\n` +
+    `💵 Сумма: <b>${(rec.cents / 100).toFixed(2)} USDT</b>\n` +
+    `⏰ ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`
+  );
   return true;
 }
 
@@ -106,6 +126,44 @@ const listStickers = () => {
 http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
+    // ---- Telegram bot webhook (для /start уведомлений)
+    if (url.pathname === '/api/bot-webhook' && req.method === 'POST') {
+      const raw = await readBody(req);
+      try {
+        const upd = JSON.parse(raw);
+        const msg = upd.message;
+        if (msg && msg.text) {
+          const from = msg.from || {};
+          const name = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Неизвестный';
+          const username = from.username ? `@${from.username}` : `ID: ${from.id}`;
+          if (msg.text.startsWith('/start')) {
+            await notify(
+              `🎰 <b>Новый игрок запустил бота!</b>\n\n` +
+              `👤 Имя: <b>${name}</b>\n` +
+              `🔗 Юзернейм: ${username}\n` +
+              `🆔 ID: <code>${from.id}</code>\n` +
+              `⏰ ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })}`
+            );
+            // Отвечаем пользователю
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: msg.chat.id,
+                text: '🎰 Добро пожаловать в Casino!\n\nНажми кнопку ниже чтобы открыть игры 👇',
+                reply_markup: {
+                  inline_keyboard: [[{
+                    text: '🎮 Играть',
+                    web_app: { url: E.BOT_LINK || '' }
+                  }]]
+                }
+              }),
+            }).catch(() => {});
+          }
+        }
+      } catch {}
+      return json(res, 200, { ok: true });
+    }
     if (url.pathname === '/api/crypto-webhook' && req.method === 'POST') {
       const raw = await readBody(req);
       const key = crypto.createHash('sha256').update(CP_TOKEN).digest();
@@ -161,4 +219,14 @@ http.createServer(async (req, res) => {
     console.error(e);
     json(res, 500, { error: 'server_error' });
   }
-}).listen(E.PORT || 3000, () => { console.log('Nekit Games: http://localhost:' + (E.PORT || 3000)); syncStickers(); });
+}).listen(E.PORT || 3000, () => { console.log('Casino: http://localhost:' + (E.PORT || 3000)); syncStickers();
+  // устанавливаем вебхук бота если указан домен
+  if (BOT_TOKEN && E.APP_URL) {
+    const wh = `${E.APP_URL}/api/bot-webhook`;
+    fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: wh }),
+    }).then(r => r.json()).then(j => console.log('Webhook:', j.ok ? '✅ установлен → ' + wh : '❌ ' + j.description)).catch(e => console.log('Webhook error:', e.message));
+  }
+});
